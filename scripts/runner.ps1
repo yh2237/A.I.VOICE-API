@@ -1,7 +1,5 @@
 $ErrorActionPreference = 'Continue'
 $API_DIR  = 'C:\A.I.VOICE-API'
-$NODE_EXE = (Get-Command node -ErrorAction SilentlyContinue).Source
-if (-not $NODE_EXE) { $NODE_EXE = 'node' }
 $SERVER_JS = 'C:\A.I.VOICE-API\server.js'
 $LOG_DIR  = 'C:\A.I.VOICE-API\logs'
 $PID_FILE = 'C:\A.I.VOICE-API\api.pid'
@@ -13,6 +11,45 @@ function Write-Log([string]$msg) {
     $line = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + " " + $msg
     Add-Content -Path $LOG_FILE -Value $line -Encoding UTF8
 }
+
+function Resolve-NodeExe {
+    $configFile = Join-Path $API_DIR 'config\config.yml'
+    if (Test-Path $configFile) {
+        try {
+            $raw = Get-Content $configFile -Raw -Encoding UTF8
+            if ($raw -match 'node_exe:\s*"(.+?)"') {
+                $candidate = $matches[1]
+                if ($candidate -and (Test-Path $candidate)) {
+                    return $candidate
+                }
+            }
+        } catch {}
+    }
+
+    $fromCmd = (Get-Command node -ErrorAction SilentlyContinue).Source
+    if ($fromCmd -and (Test-Path $fromCmd)) {
+        return $fromCmd
+    }
+
+    $common = @(
+        "$env:ProgramFiles\nodejs\node.exe",
+        "${env:ProgramFiles(x86)}\nodejs\node.exe",
+        "$env:LOCALAPPDATA\Programs\nodejs\node.exe",
+        "$env:APPDATA\nvm\node.exe"
+    )
+    foreach ($p in $common) {
+        if (Test-Path $p) { return $p }
+    }
+
+    return $null
+}
+
+$NODE_EXE = Resolve-NodeExe
+if (-not $NODE_EXE) {
+    Write-Log "[RUNNER] FATAL: Cannot find node.exe. Set aivoice.node_exe in config/config.yml"
+    exit 1
+}
+Write-Log "[RUNNER] node.exe = $NODE_EXE"
 
 if (Test-Path $PID_FILE) {
     $existingPid = (Get-Content $PID_FILE -ErrorAction SilentlyContinue).Trim()
@@ -38,18 +75,23 @@ $crashTimes   = [System.Collections.Generic.List[datetime]]::new()
 try {
     while ($true) {
         Write-Log "[RUNNER] Starting A.I.VOICE-API..."
-        $ts     = Get-Date -Format 'yyyyMMdd-HHmmss'
-        $outLog = Join-Path $LOG_DIR "api-out-$ts.log"
 
-        $proc = Start-Process -FilePath $NODE_EXE `
-            -ArgumentList "`"$SERVER_JS`"" `
-            -WorkingDirectory $API_DIR `
-            -NoNewWindow -PassThru `
-            -RedirectStandardOutput $outLog `
-            -RedirectStandardError  $outLog
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $NODE_EXE
+        $psi.Arguments = $SERVER_JS
+        $psi.WorkingDirectory = $API_DIR
+        $psi.UseShellExecute = $true
+        $psi.CreateNoWindow = $true
+
+        $proc = [System.Diagnostics.Process]::Start($psi)
+
+        if (-not $proc) {
+            Write-Log "[RUNNER] FATAL: Process.Start() returned null"
+            break
+        }
 
         [string]$proc.Id | Out-File $PID_FILE -Encoding ascii -NoNewline
-        Write-Log "[RUNNER] A.I.VOICE-API started (PID=$($proc.Id), log=$outLog)"
+        Write-Log "[RUNNER] A.I.VOICE-API started (PID=$($proc.Id))"
 
         $proc.WaitForExit()
         $exitCode = $proc.ExitCode

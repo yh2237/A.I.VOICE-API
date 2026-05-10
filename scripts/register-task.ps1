@@ -1,16 +1,27 @@
-if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) { Start-Process powershell.exe "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs; exit }
-
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+$whoami = whoami 2>$null
+if (-not $whoami) {
+    $whoami = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+}
+Write-Host "[AIVoiceAPI] Registering task for: $whoami"
 
 $action = New-ScheduledTaskAction `
     -Execute 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
     -Argument '-NoProfile -ExecutionPolicy Bypass -File C:\A.I.VOICE-API\scripts\runner.ps1' `
     -WorkingDirectory 'C:\A.I.VOICE-API'
 
-$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
+$trigger = New-ScheduledTaskTrigger -AtLogon
+
+$principal = New-ScheduledTaskPrincipal -UserId $whoami -LogonType Interactive -RunLevel Highest
 
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
 
-Register-ScheduledTask -TaskName 'AIVoiceAPI' -Action $action -Principal $principal -Settings $settings -Force
-Write-Host '[AIVoiceAPI] Task registered OK'
-Write-Host '[AIVoiceAPI] 起動するには start.bat を実行してください'
+try {
+    Register-ScheduledTask -TaskName 'AIVoiceAPI' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force -ErrorAction Stop
+    Write-Host '[AIVoiceAPI] Task registered OK (auto-start at logon)'
+    Write-Host '[AIVoiceAPI] Manage with: start.bat / stop.bat / status.bat / update.bat'
+} catch {
+    Write-Host "[AIVoiceAPI] Register failed: $_"
+    Write-Host "[AIVoiceAPI] Try running this from an admin PowerShell terminal, not SSH."
+}
