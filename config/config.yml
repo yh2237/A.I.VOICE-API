@@ -5,3 +5,4 @@ server:
 aivoice:
   dll_path: "C:\\Program Files\\AI\\AIVoice\\AIVoiceEditor\\AI.Talk.Editor.Api.dll"
   host_name: ""
+  node_exe: "C:\\Program Files\\nodejs\\node.exe"
