@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Continue'
 $API_DIR  = 'C:\A.I.VOICE-API'
-$NODE_EXE = 'C:\Program Files\nodejs\node.exe'
+$NODE_EXE = (Get-Command node -ErrorAction SilentlyContinue).Source
+if (-not $NODE_EXE) { $NODE_EXE = 'node' }
 $SERVER_JS = 'C:\A.I.VOICE-API\server.js'
 $LOG_DIR  = 'C:\A.I.VOICE-API\logs'
 $PID_FILE = 'C:\A.I.VOICE-API\api.pid'
