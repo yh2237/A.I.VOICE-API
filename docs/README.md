@@ -138,6 +138,7 @@ A.I.VOICE Editorに再接続します。接続が切れた場合や起動後にE
 | `middlePause` | number | - | `150` | 読点のポーズ (ms) |
 | `longPause` | number | - | `370` | 長ポーズ (ms) |
 | `sentencePause` | number | - | `800` | 文末ポーズ (ms) |
+| `priority` | number | - | `0` | キュー優先度。値が高いほど優先処理 (同値は先着順) |
 
 リクエスト例:
 
