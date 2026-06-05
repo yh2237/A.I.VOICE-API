@@ -66,6 +66,7 @@ app.post('/api/synthesize', async (req, res) => {
         middlePause,
         longPause,
         sentencePause,
+        priority,
     } = req.body;
 
     if (!text || typeof text !== 'string') {
@@ -83,6 +84,7 @@ app.post('/api/synthesize', async (req, res) => {
             middlePause: middlePause ?? 150,
             longPause: longPause ?? 370,
             sentencePause: sentencePause ?? 800,
+            priority: priority ?? 0,
         });
 
         res.set({
