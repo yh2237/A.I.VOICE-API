@@ -1,5 +1,7 @@
 # A.I.VOICE-API
 
+**複数人が同時に接続し利用することが可能な状態にしないでください。**
+
 A.I.VOICE Editorの内部APIをHTTP REST APIでラップしたWindows向け音声合成サーバー
 
 ## アーキテクチャ
