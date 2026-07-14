@@ -110,6 +110,39 @@ Invoke-RestMethod -Uri http://localhost:58080/api/synthesize `
 
 成功時 `audio/wav`。エラー時400/500/503。
 
+### `POST` / `GET` `/api/synthesize/benchmark`
+
+`/api/synthesize` と同じパラメータを受け付け、音声合成のベンチマーク結果を JSON で返す。
+
+| メソッド | パラメータ |
+|---|---|
+| POST | JSON Body（`/api/synthesize` と同形式） |
+| GET | クエリパラメータ（例: `?text=こんにちは&speed=1.2`） |
+
+```json
+{
+  "elapsedMs":    1234,
+  "queueWaitMs":  234,
+  "synthMs":      1000,
+  "hardware": {
+    "cpuName":     "Intel(R) Core(TM) i7-8700K CPU @ 3.70GHz",
+    "cpuCores":    8,
+    "osDescription": "Microsoft Windows 10.0.19045",
+    "architecture": "X64"
+  }
+}
+```
+
+```powershell
+Invoke-RestMethod -Uri http://localhost:58080/api/synthesize/benchmark `
+  -Method Post -ContentType 'application/json' `
+  -Body '{"text":"こんにちは"}'
+
+Invoke-RestMethod -Uri 'http://localhost:58080/api/synthesize/benchmark?text=こんにちは&speed=1.2'
+```
+
+エラー時は `/api/synthesize` と同じ 400/500/503 形式。
+
 ### 合成キュー
 
 合成は内部キューで1件ずつ逐次処理。`priority` が高い順、同値は先着順。
