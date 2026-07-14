@@ -79,4 +79,49 @@ app.MapPost("/api/synthesize", async (AiVoiceService svc, HttpRequest req, Cance
     }
 });
 
+app.MapPost("/api/synthesize/benchmark", async (AiVoiceService svc, HttpRequest req, CancellationToken ct) =>
+{
+    if (!svc.Ready)
+        return Results.Json(new { error = "A.I.VOICE not connected" }, statusCode: 503);
+
+    SynthesisParams? body;
+    try
+    {
+        body = await req.ReadFromJsonAsync<SynthesisParams>(cancellationToken: ct);
+    }
+    catch
+    {
+        return Results.Json(new { error = "Invalid JSON" }, statusCode: 400);
+    }
+
+    if (body == null || string.IsNullOrEmpty(body.Text))
+        return Results.Json(new { error = "Missing or invalid \"text\" field" }, statusCode: 400);
+
+    try
+    {
+        var result = await svc.SynthesizeBenchmarkAsync(body, ct);
+        return Results.Json(new
+        {
+            elapsedMs = result.ElapsedMs,
+            queueWaitMs = result.QueueWaitMs,
+            synthMs = result.SynthMs,
+            hardware = new
+            {
+                cpuName = result.Hardware.CpuName,
+                cpuCores = result.Hardware.CpuCores,
+                osDescription = result.Hardware.OsDescription,
+                architecture = result.Hardware.Architecture,
+            },
+        });
+    }
+    catch (OperationCanceledException)
+    {
+        return Results.Json(new { error = "Request cancelled" }, statusCode: 499);
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: 500);
+    }
+});
+
 app.Run();

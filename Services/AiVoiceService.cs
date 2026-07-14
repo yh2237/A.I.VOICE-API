@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 
 namespace AIVoiceApi.Services;
@@ -148,6 +149,25 @@ public sealed class AiVoiceService : IHostedService, IDisposable
         return tcs.Task;
     }
 
+    public async Task<SynthesisBenchmarkResult> SynthesizeBenchmarkAsync(SynthesisParams p, CancellationToken ct = default)
+    {
+        var totalSw = Stopwatch.StartNew();
+        var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        ct.Register(() => tcs.TrySetCanceled(ct));
+        var item = _queue.Enqueue(p, tcs);
+        _ = ProcessQueueLoopAsync();
+        var wav = await tcs.Task;
+        totalSw.Stop();
+        return new SynthesisBenchmarkResult
+        {
+            Wav = wav,
+            ElapsedMs = totalSw.ElapsedMilliseconds,
+            QueueWaitMs = item.QueueWaitMs,
+            SynthMs = item.SynthMs,
+            Hardware = HardwareInfo.Current,
+        };
+    }
+
     private async Task ProcessQueueLoopAsync()
     {
         if (Interlocked.CompareExchange(ref _synthBusy, 1, 0) != 0) return;
@@ -159,9 +179,14 @@ public sealed class AiVoiceService : IHostedService, IDisposable
                 var item = _queue.TryDequeue();
                 if (item == null) break;
 
+                item.QueueWaitMs = (long)(DateTimeOffset.UtcNow - item.EnqueuedAt).TotalMilliseconds;
+
                 try
                 {
+                    var synthSw = Stopwatch.StartNew();
                     var wav = await DoSynthesizeAsync(item.Params);
+                    synthSw.Stop();
+                    item.SynthMs = synthSw.ElapsedMilliseconds;
                     item.Tcs.TrySetResult(wav);
                 }
                 catch (Exception ex)
@@ -226,5 +251,66 @@ public sealed class AiVoiceService : IHostedService, IDisposable
     {
         _keepaliveTimer?.Dispose();
         _stopCts?.Dispose();
+    }
+}
+
+public class SynthesisBenchmarkResult
+{
+    public required byte[] Wav { get; init; }
+    public required long ElapsedMs { get; init; }
+    public required long QueueWaitMs { get; init; }
+    public required long SynthMs { get; init; }
+    public required HardwareInfo Hardware { get; init; }
+}
+
+public record HardwareInfo
+{
+    public string? CpuName { get; init; }
+    public int CpuCores { get; init; }
+    public string? OsDescription { get; init; }
+    public string? Architecture { get; init; }
+
+    private static HardwareInfo? _current;
+    private static readonly object _lock = new();
+
+    public static HardwareInfo Current
+    {
+        get
+        {
+            if (_current != null) return _current;
+            lock (_lock)
+            {
+                if (_current != null) return _current;
+                _current = Load();
+            }
+            return _current;
+        }
+    }
+
+    private static HardwareInfo Load()
+    {
+        var cpuName = GetCpuName();
+
+        return new HardwareInfo
+        {
+            CpuName = cpuName,
+            CpuCores = Environment.ProcessorCount,
+            OsDescription = System.Runtime.InteropServices.RuntimeInformation.OSDescription,
+            Architecture = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture.ToString(),
+        };
+    }
+
+    private static string? GetCpuName()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                @"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
+            if (key?.GetValue("ProcessorNameString") is string name && !string.IsNullOrWhiteSpace(name))
+                return name.Trim();
+        }
+        catch { }
+
+        return Environment.GetEnvironmentVariable("PROCESSOR_IDENTIFIER");
     }
 }

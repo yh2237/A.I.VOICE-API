@@ -6,15 +6,18 @@ public class SynthesisQueue
     private readonly List<Item> _items = new();
     private long _seq;
 
-    public void Enqueue(SynthesisParams p, TaskCompletionSource<byte[]> tcs)
+    public Item Enqueue(SynthesisParams p, TaskCompletionSource<byte[]> tcs)
     {
         var priority = p.Priority;
         long seq;
+        Item item;
         lock (_lock)
         {
             seq = ++_seq;
-            _items.Add(new Item(p, tcs, priority, seq));
+            item = new Item(p, tcs, priority, seq);
+            _items.Add(item);
         }
+        return item;
     }
 
     public Item? TryDequeue()
@@ -41,10 +44,22 @@ public class SynthesisQueue
         get { lock (_lock) return _items.Count > 0; }
     }
 
-    public record Item(
-        SynthesisParams Params,
-        TaskCompletionSource<byte[]> Tcs,
-        int Priority,
-        long Seq
-    );
+    public class Item
+    {
+        public SynthesisParams Params { get; }
+        public TaskCompletionSource<byte[]> Tcs { get; }
+        public int Priority { get; }
+        public long Seq { get; }
+        public DateTimeOffset EnqueuedAt { get; } = DateTimeOffset.UtcNow;
+        public long QueueWaitMs { get; set; }
+        public long SynthMs { get; set; }
+
+        public Item(SynthesisParams p, TaskCompletionSource<byte[]> tcs, int priority, long seq)
+        {
+            Params = p;
+            Tcs = tcs;
+            Priority = priority;
+            Seq = seq;
+        }
+    }
 }
