@@ -27,8 +27,8 @@ HTTPクライアント → ASP.NET Core → COM → AI.Talk.Editor.Api.dll → A
 ## 前提
 
 - **Windows**
-- **A.I.VOICE Editor** インストール済み（未起動でもサーバーが自動起動する）
-- **.NET 8 SDK**（ビルド時のみ）
+- **A.I.VOICE Editor** インストール済み（未起動でもサーバーが自動でエディタを起動します）
+- **.NET 8 SDK**（ビルド時）
 
 ## セットアップ
 
