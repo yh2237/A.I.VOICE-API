@@ -7,10 +7,17 @@
     <RootNamespace>AIVoiceApi</RootNamespace>
     <AssemblyName>AIVOICE-API</AssemblyName>
     <DebugType>none</DebugType>
+    <Version>1.0.2</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <DefaultItemExcludes>$(DefaultItemExcludes);publish\**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>
     <Content Include="watchdog.bat">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="update.bat">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>

@@ -8,10 +8,57 @@ builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
 builder.Services.AddSingleton<AiVoiceService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<AiVoiceService>());
+builder.Services.AddSingleton<UpdateService>();
 
 var app = builder.Build();
 
+var startedAt = DateTimeOffset.Now;
+
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+
+app.MapGet("/api/info", (AiVoiceService svc) => Results.Ok(new
+{
+    name = "A.I.VOICE-API",
+    version = UpdateService.CurrentVersion,
+    pid = Environment.ProcessId,
+    startedAt,
+    uptimeSec = (long)(DateTimeOffset.Now - startedAt).TotalSeconds,
+    editor = new
+    {
+        connected = svc.Ready,
+        hostName = svc.CurrentHostName,
+        version = svc.Version,
+    },
+}));
+
+app.MapGet("/api/update/check", async (UpdateService upd, CancellationToken ct) =>
+{
+    try
+    {
+        return Results.Ok(await upd.CheckAsync(ct));
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: 502);
+    }
+});
+
+app.MapPost("/api/update", async (UpdateService upd, HttpRequest req, CancellationToken ct) =>
+{
+    var force = bool.TryParse(req.Query["force"], out var f) && f;
+    try
+    {
+        return Results.Ok(await upd.StartUpdateAsync(force, ct));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: 409);
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: 502);
+    }
+});
 
 app.MapGet("/api/status", (AiVoiceService svc) => Results.Ok(new
 {
