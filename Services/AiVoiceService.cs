@@ -7,15 +7,18 @@ public sealed class AiVoiceService : IHostedService, IDisposable
 {
     private readonly string _dllPath;
     private readonly string _targetHostName;
+    private readonly string _hostProcessName;
+    private readonly string _editorPath;
     private readonly ILogger<AiVoiceService> _logger;
     private readonly SynthesisQueue _queue = new();
 
     private dynamic? _tts;
-    private Timer? _keepaliveTimer;
+    private Task? _supervisorTask;
     private CancellationTokenSource? _stopCts;
     private string? _lastPresetName;
     private string? _lastMasterControl;
     private volatile int _synthBusy;
+    private volatile int _restartBusy;
 
     public bool Ready { get; private set; }
     public string? CurrentHostName { get; private set; }
@@ -32,63 +35,142 @@ public sealed class AiVoiceService : IHostedService, IDisposable
             ?? config["AiVoice:HostName"]
             ?? "";
 
+        _hostProcessName = Environment.GetEnvironmentVariable("AIVOICE_PROCESS_NAME")
+            ?? config["AiVoice:ProcessName"]
+            ?? "AIVoiceEditor";
+
+        _editorPath = Environment.GetEnvironmentVariable("AIVOICE_EDITOR_PATH")
+            ?? config["AiVoice:EditorPath"]
+            ?? @"C:\Program Files\AI\AIVoice\AIVoiceEditor\AIVoiceEditor.exe";
+
         _logger = logger;
     }
 
-    public async Task StartAsync(CancellationToken ct)
+    public Task StartAsync(CancellationToken ct)
     {
         _stopCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-
-        try
-        {
-            await ConnectAsync();
-            _logger.LogInformation(
-                "A.I.VOICE connected. Host: {Host}, Presets: {Presets}",
-                CurrentHostName, string.Join(", ", PresetNames));
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Could not connect to A.I.VOICE on startup. Use POST /api/reconnect to retry.");
-        }
-
-        _keepaliveTimer = new Timer(_ => _ = DoKeepaliveAsync(), null,
-            TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+        _supervisorTask = Task.Run(() => SupervisorLoopAsync(_stopCts.Token));
+        return Task.CompletedTask;
     }
 
     public async Task StopAsync(CancellationToken ct)
     {
         _stopCts?.Cancel();
-        if (_keepaliveTimer != null)
+        if (_supervisorTask != null)
         {
-            await _keepaliveTimer.DisposeAsync();
+            try { await _supervisorTask.WaitAsync(TimeSpan.FromSeconds(5), ct); } catch { }
         }
 
         await DisconnectAsync();
+    }
+
+    private async Task SupervisorLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                if (_restartBusy == 0 && !IsConnectionHealthy())
+                {
+                    await RecoverAsync(ct);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Supervisor iteration failed");
+            }
+
+            try { await Task.Delay(TimeSpan.FromSeconds(10), ct); }
+            catch (OperationCanceledException) { break; }
+        }
+    }
+
+    private bool IsConnectionHealthy()
+    {
+        if (!Ready || _tts == null) return false;
+        try
+        {
+            var status = (string)_tts.Status.ToString();
+            return status != "NotRunning" && status != "NotConnected";
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private async Task RecoverAsync(CancellationToken ct)
+    {
+        if (Interlocked.CompareExchange(ref _restartBusy, 1, 0) != 0) return;
+
+        try
+        {
+            for (int attempt = 1; ; attempt++)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                try
+                {
+                    await ConnectAsync();
+                    _logger.LogInformation(
+                        "A.I.VOICE connected. Host: {Host}, Presets: {Presets}",
+                        CurrentHostName, string.Join(", ", PresetNames));
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Connect failed (attempt {Attempt}); restarting editor process", attempt);
+                }
+
+                try
+                {
+                    await TerminateHostAsync();
+                    StartEditorProcess();
+                    await Task.Delay(TimeSpan.FromSeconds(3), ct);
+                    await ConnectAsync();
+                    _logger.LogInformation(
+                        "A.I.VOICE Editor restarted and connected. Host: {Host}, Presets: {Presets}",
+                        CurrentHostName, string.Join(", ", PresetNames));
+                    return;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Editor restart failed (attempt {Attempt})", attempt);
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(Math.Min(5 * attempt, 60)), ct);
+            }
+        }
+        finally
+        {
+            _restartBusy = 0;
+        }
     }
 
     public async Task ConnectAsync()
     {
         await DisconnectAsync();
 
-        var ttsType = Type.GetTypeFromProgID("AI.Talk.Editor.Api.TtsControl")
-            ?? throw new InvalidOperationException(
-                "COM ProgID 'AI.Talk.Editor.Api.TtsControl' not found. Is A.I.VOICE Editor installed?");
-        dynamic tts = Activator.CreateInstance(ttsType)!;
-
-        string[] hosts = tts.GetAvailableHostNames();
-        if (hosts == null || hosts.Length == 0)
-            throw new InvalidOperationException("No available hosts. Make sure A.I.VOICE Editor is running.");
-
-        var hostName = string.IsNullOrEmpty(_targetHostName) ? hosts[0] : _targetHostName;
-        tts.Initialize(hostName);
+        var (tts, hostName) = CreateTtsControl();
 
         if (tts.Status.ToString() == "NotRunning")
         {
-            tts.StartHost();
-            for (int i = 0; i < 30; i++)
+            try { tts.StartHost(); } catch { }
+            await WaitWhileNotRunningAsync(tts, 30);
+
+            if (tts.Status.ToString() == "NotRunning")
             {
-                await Task.Delay(200);
-                if (tts.Status.ToString() != "NotRunning") break;
+                StartEditorProcess();
+                await WaitWhileNotRunningAsync(tts, 75);
             }
         }
 
@@ -105,6 +187,145 @@ public sealed class AiVoiceService : IHostedService, IDisposable
         _lastMasterControl = null;
     }
 
+    public async Task RestartHostAsync()
+    {
+        if (Interlocked.CompareExchange(ref _restartBusy, 1, 0) != 0)
+            throw new InvalidOperationException("Restart already in progress");
+
+        try
+        {
+            _logger.LogInformation("Restarting A.I.VOICE Editor...");
+            Ready = false;
+            await TerminateHostAsync();
+            await ConnectWithRetryAsync();
+            _logger.LogInformation("A.I.VOICE Editor restarted. Host: {Host}", CurrentHostName);
+        }
+        finally
+        {
+            _restartBusy = 0;
+        }
+    }
+
+    private (dynamic Tts, string HostName) CreateTtsControl()
+    {
+        var ttsType = Type.GetTypeFromProgID("AI.Talk.Editor.Api.TtsControl")
+            ?? throw new InvalidOperationException(
+                "COM ProgID 'AI.Talk.Editor.Api.TtsControl' not found. Is A.I.VOICE Editor installed?");
+        dynamic tts = Activator.CreateInstance(ttsType)!;
+
+        string[] hosts = tts.GetAvailableHostNames();
+        if (hosts == null || hosts.Length == 0)
+            throw new InvalidOperationException("No available hosts. Make sure A.I.VOICE Editor is running.");
+
+        var hostName = string.IsNullOrEmpty(_targetHostName) ? hosts[0] : _targetHostName;
+        tts.Initialize(hostName);
+        return (tts, hostName);
+    }
+
+    private async Task TerminateHostAsync()
+    {
+        dynamic? tts = _tts;
+        _tts = null;
+
+        try
+        {
+            if (tts == null)
+            {
+                (tts, _) = CreateTtsControl();
+            }
+
+            var status = (string)tts!.Status.ToString();
+            if (status != "NotRunning")
+            {
+                if (status == "NotConnected")
+                {
+                    try { tts.Connect(); } catch { }
+                }
+
+                tts.TerminateHost();
+
+                for (int i = 0; i < 75; i++)
+                {
+                    await Task.Delay(200);
+                    if (tts.Status.ToString() == "NotRunning") break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Graceful host termination failed; falling back to process kill");
+        }
+
+        await KillRemainingHostProcessesAsync();
+    }
+
+    private static async Task WaitWhileNotRunningAsync(dynamic tts, int iterations)
+    {
+        for (int i = 0; i < iterations; i++)
+        {
+            await Task.Delay(200);
+            if (tts.Status.ToString() != "NotRunning") break;
+        }
+    }
+
+    private void StartEditorProcess()
+    {
+        var existing = Process.GetProcessesByName(_hostProcessName);
+        var alreadyRunning = existing.Length > 0;
+        foreach (var p in existing) p.Dispose();
+        if (alreadyRunning) return;
+
+        if (!File.Exists(_editorPath))
+            throw new InvalidOperationException($"A.I.VOICE Editor executable not found: {_editorPath}");
+
+        _logger.LogInformation("Starting A.I.VOICE Editor process: {Path}", _editorPath);
+        using var proc = Process.Start(new ProcessStartInfo
+        {
+            FileName = _editorPath,
+            WorkingDirectory = Path.GetDirectoryName(_editorPath) ?? "",
+            UseShellExecute = true,
+        });
+    }
+
+    private async Task KillRemainingHostProcessesAsync()
+    {
+        foreach (var proc in Process.GetProcessesByName(_hostProcessName))
+        {
+            try
+            {
+                _logger.LogWarning("Force killing {Name} (PID {Pid})", proc.ProcessName, proc.Id);
+                proc.Kill(entireProcessTree: true);
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                await proc.WaitForExitAsync(cts.Token);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to kill {Name} (PID {Pid})", proc.ProcessName, proc.Id);
+            }
+            finally
+            {
+                proc.Dispose();
+            }
+        }
+    }
+
+    private async Task ConnectWithRetryAsync(int attempts = 5, int delayMs = 2000)
+    {
+        for (int i = 1; ; i++)
+        {
+            try
+            {
+                await ConnectAsync();
+                return;
+            }
+            catch (Exception ex) when (i < attempts)
+            {
+                _logger.LogWarning(ex, "Connect attempt {Attempt}/{Total} failed; retrying", i, attempts);
+                await Task.Delay(delayMs);
+            }
+        }
+    }
+
     private async Task DisconnectAsync()
     {
         Ready = false;
@@ -114,30 +335,6 @@ public sealed class AiVoiceService : IHostedService, IDisposable
             _tts = null;
         }
         await Task.CompletedTask;
-    }
-
-    private async Task DoKeepaliveAsync()
-    {
-        if (!Ready || _tts == null) return;
-        try
-        {
-            var status = _tts.Status.ToString();
-            if (status == "NotRunning")
-            {
-                _tts.StartHost();
-                for (int i = 0; i < 30; i++)
-                {
-                    await Task.Delay(200);
-                    if (_tts.Status.ToString() != "NotRunning") break;
-                }
-                _tts.Connect();
-                _lastMasterControl = null;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Keepalive failed");
-        }
     }
 
     public Task<byte[]> SynthesizeAsync(SynthesisParams p, CancellationToken ct = default)
@@ -249,7 +446,6 @@ public sealed class AiVoiceService : IHostedService, IDisposable
 
     public void Dispose()
     {
-        _keepaliveTimer?.Dispose();
         _stopCts?.Dispose();
     }
 }

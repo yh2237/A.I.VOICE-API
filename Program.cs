@@ -46,6 +46,24 @@ app.MapPost("/api/reconnect", async (AiVoiceService svc) =>
     }
 });
 
+app.MapPost("/api/restart", async (AiVoiceService svc) =>
+{
+    try
+    {
+        await svc.RestartHostAsync();
+        return Results.Ok(new
+        {
+            connected = true,
+            hostName = svc.CurrentHostName,
+            presetNames = svc.PresetNames,
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: 503);
+    }
+});
+
 app.MapPost("/api/synthesize", async (AiVoiceService svc, HttpRequest req, CancellationToken ct) =>
 {
     if (!svc.Ready)
