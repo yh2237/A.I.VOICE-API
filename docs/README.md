@@ -20,7 +20,7 @@ HTTPクライアント → ASP.NET Core → COM → AI.Talk.Editor.Api.dll → A
 ## 前提
 
 - **Windows**
-- **A.I.VOICE Editor** インストール済み・起動中
+- **A.I.VOICE Editor** インストール済み（未起動でもサーバーが自動起動する）
 - **.NET 8 SDK**（ビルド時のみ）
 
 ## セットアップ
@@ -39,12 +39,32 @@ build.bat
   "Server": { "Port": 58080 },
   "AiVoice": {
     "DllPath": "C:\\Program Files\\AI\\AIVoice\\AIVoiceEditor\\AI.Talk.Editor.Api.dll",
-    "HostName": ""
+    "HostName": "",
+    "ProcessName": "AIVoiceEditor",
+    "EditorPath": "C:\\Program Files\\AI\\AIVoice\\AIVoiceEditor\\AIVoiceEditor.exe"
   }
 }
 ```
 
-環境変数でも上書き可能：`PORT` / `AIVOICE_DLL_PATH` / `AIVOICE_HOST_NAME`
+| キー | 説明 |
+|---|---|
+| `DllPath` | A.I.VOICE Editor API のDLLパス |
+| `HostName` | 接続先ホスト名（空なら先頭のホスト） |
+| `ProcessName` | エディタのプロセス名（強制終了・起動判定に使用） |
+| `EditorPath` | エディタ実行ファイルのパス（自動起動に使用） |
+
+環境変数でも上書き可能：`PORT` / `AIVOICE_DLL_PATH` / `AIVOICE_HOST_NAME` / `AIVOICE_PROCESS_NAME` / `AIVOICE_EDITOR_PATH`
+
+## 自動接続・自動復旧
+
+サーバー起動中はバックグラウンドのスーパーバイザーが10秒間隔で接続を監視し、切断を検知すると接続が回復するまで無限に復旧を試みる：
+
+1. 再接続を試行
+2. 失敗したらエディタを終了（`TerminateHost` → 残存プロセスを強制終了）
+3. `EditorPath` からエディタを起動して再接続
+4. それでも失敗したらバックオフ（最大60秒）を挟んで 1 から繰り返し
+
+起動時にエディタが未起動・接続不能の場合も同じフローで自動復旧する。
 
 ## 起動
 
@@ -83,6 +103,21 @@ publish\watchdog.bat          # クラッシュ時自動再起動
 ### `POST /api/reconnect`
 
 A.I.VOICE Editorに再接続。成功時は `/api/status` と同形式。失敗時 503。
+
+### `POST /api/restart`
+
+A.I.VOICE Editorを再起動して再接続。
+
+1. `TerminateHost` でエディタを終了（最大15秒待機）
+2. 終了しない場合は `ProcessName` のプロセスを強制終了
+3. エディタを起動し再接続（最大5回リトライ）
+
+成功時は `/api/status` と同形式。失敗時・再起動中の重複呼び出し時は 503。
+エディタ起動を待つため応答に数十秒かかることがある。再起動中に投入された合成リクエストは失敗する。
+
+```powershell
+Invoke-RestMethod -Uri http://localhost:58080/api/restart -Method Post
+```
 
 ### `POST /api/synthesize`
 
