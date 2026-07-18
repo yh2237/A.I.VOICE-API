@@ -50,7 +50,8 @@ build.bat
     "DllPath": "C:\\Program Files\\AI\\AIVoice\\AIVoiceEditor\\AI.Talk.Editor.Api.dll",
     "HostName": "",
     "ProcessName": "AIVoiceEditor",
-    "EditorPath": "C:\\Program Files\\AI\\AIVoice\\AIVoiceEditor\\AIVoiceEditor.exe"
+    "EditorPath": "C:\\Program Files\\AI\\AIVoice\\AIVoiceEditor\\AIVoiceEditor.exe",
+    "StartupTimeoutSec": 120
   },
   "Update": {
     "GitHubRepo": "yh2237/A.I.VOICE-API"
@@ -64,9 +65,10 @@ build.bat
 | `HostName` | 接続先ホスト名（空なら先頭のホスト） |
 | `ProcessName` | エディタのプロセス名（強制終了・起動判定に使用） |
 | `EditorPath` | エディタ実行ファイルのパス（自動起動に使用） |
+| `StartupTimeoutSec` | エディタ起動完了（接続受付開始）までの最大待機秒数 |
 | `GitHubRepo` | アップデート取得元のGitHubリポジトリ（`owner/repo`） |
 
-環境変数でも上書き可能：`PORT` / `AIVOICE_DLL_PATH` / `AIVOICE_HOST_NAME` / `AIVOICE_PROCESS_NAME` / `AIVOICE_EDITOR_PATH` / `UPDATE_GITHUB_REPO`
+環境変数でも上書き可能：`PORT` / `AIVOICE_DLL_PATH` / `AIVOICE_HOST_NAME` / `AIVOICE_PROCESS_NAME` / `AIVOICE_EDITOR_PATH` / `AIVOICE_STARTUP_TIMEOUT_SEC` / `UPDATE_GITHUB_REPO`
 
 アップデート時に `appsettings.json` は上書きされない（ユーザー設定が保持される）。
 
@@ -74,12 +76,13 @@ build.bat
 
 サーバー起動中はバックグラウンドのスーパーバイザーが10秒間隔で接続を監視し、切断を検知すると接続が回復するまで無限に復旧を試みる：
 
-1. 再接続を試行
-2. 失敗したらエディタを終了（`TerminateHost` → 残存プロセスを強制終了）
-3. `EditorPath` からエディタを起動して再接続
-4. それでも失敗したらバックオフ（最大60秒）を挟んで 1 から繰り返し
+1. 再接続を試行。エディタが未起動なら `StartHost`→ダメなら `EditorPath` から起動し、**起動完了まで最大 `StartupTimeoutSec` 秒接続をリトライし続ける**（起動中のエディタを殺さない）
+2. それでも接続できない（タイムアウト・エディタ即死・ダイアログ詰まり等）場合のみエディタを終了（`TerminateHost` → 残存プロセスを強制終了）して 1 をやり直し
+3. 失敗が続く場合はバックオフ（最大60秒）を挟んで繰り返し
 
 起動時にエディタが未起動・接続不能の場合も同じフローで自動復旧する。
+
+`POST /api/restart` もエディタ起動完了を待ってから応答するため、応答まで数十秒〜数分かかることがある。クライアント側は長めのタイムアウトを設定すること。
 
 ## 起動
 
