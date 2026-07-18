@@ -9,6 +9,7 @@ public sealed class AiVoiceService : IHostedService, IDisposable
     private readonly string _targetHostName;
     private readonly string _hostProcessName;
     private readonly string _editorPath;
+    private readonly int _startupTimeoutSec;
     private readonly ILogger<AiVoiceService> _logger;
     private readonly SynthesisQueue _queue = new();
 
@@ -42,6 +43,12 @@ public sealed class AiVoiceService : IHostedService, IDisposable
         _editorPath = Environment.GetEnvironmentVariable("AIVOICE_EDITOR_PATH")
             ?? config["AiVoice:EditorPath"]
             ?? @"C:\Program Files\AI\AIVoice\AIVoiceEditor\AIVoiceEditor.exe";
+
+        _startupTimeoutSec = int.TryParse(
+            Environment.GetEnvironmentVariable("AIVOICE_STARTUP_TIMEOUT_SEC")
+                ?? config["AiVoice:StartupTimeoutSec"], out var sts) && sts > 0
+            ? sts
+            : 120;
 
         _logger = logger;
     }
@@ -92,15 +99,8 @@ public sealed class AiVoiceService : IHostedService, IDisposable
     private bool IsConnectionHealthy()
     {
         if (!Ready || _tts == null) return false;
-        try
-        {
-            var status = (string)_tts.Status.ToString();
-            return status != "NotRunning" && status != "NotConnected";
-        }
-        catch
-        {
-            return false;
-        }
+        var status = GetStatus(_tts);
+        return status is "Idle" or "Busy";
     }
 
     private async Task RecoverAsync(CancellationToken ct)
@@ -115,24 +115,27 @@ public sealed class AiVoiceService : IHostedService, IDisposable
 
                 try
                 {
-                    await ConnectAsync();
+                    await ConnectAsync(ct);
                     _logger.LogInformation(
                         "A.I.VOICE connected. Host: {Host}, Presets: {Presets}",
                         CurrentHostName, string.Join(", ", PresetNames));
                     return;
                 }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex,
-                        "Connect failed (attempt {Attempt}); restarting editor process", attempt);
+                    _logger.LogWarning(ex, "Connect failed (attempt {Attempt})", attempt);
                 }
 
                 try
                 {
+                    _logger.LogWarning("Forcing editor restart (attempt {Attempt})", attempt);
                     await TerminateHostAsync();
-                    StartEditorProcess();
-                    await Task.Delay(TimeSpan.FromSeconds(3), ct);
-                    await ConnectAsync();
+                    await Task.Delay(TimeSpan.FromSeconds(2), ct);
+                    await ConnectAsync(ct);
                     _logger.LogInformation(
                         "A.I.VOICE Editor restarted and connected. Host: {Host}, Presets: {Presets}",
                         CurrentHostName, string.Join(", ", PresetNames));
@@ -156,25 +159,61 @@ public sealed class AiVoiceService : IHostedService, IDisposable
         }
     }
 
-    public async Task ConnectAsync()
+    public async Task ConnectAsync(CancellationToken ct = default)
     {
         await DisconnectAsync();
 
         var (tts, hostName) = CreateTtsControl();
 
-        if (tts.Status.ToString() == "NotRunning")
+        if (GetStatus(tts) == "NotRunning")
         {
-            try { tts.StartHost(); } catch { }
-            await WaitWhileNotRunningAsync(tts, 30);
+            _logger.LogInformation("Editor not running. Starting via StartHost...");
+            try { tts.StartHost(); } catch (Exception ex) { _logger.LogDebug(ex, "StartHost failed"); }
+            await WaitWhileNotRunningAsync(tts, TimeSpan.FromSeconds(15), ct);
 
-            if (tts.Status.ToString() == "NotRunning")
+            if (GetStatus(tts) == "NotRunning")
             {
+                _logger.LogInformation("StartHost had no effect. Starting editor executable...");
                 StartEditorProcess();
-                await WaitWhileNotRunningAsync(tts, 75);
+                await WaitWhileNotRunningAsync(tts, TimeSpan.FromSeconds(30), ct);
+
+                if (GetStatus(tts) == "NotRunning")
+                    throw new InvalidOperationException(
+                        "A.I.VOICE Editor process did not start. Check AiVoice:EditorPath.");
             }
         }
 
-        tts.Connect();
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(_startupTimeoutSec);
+        var loggedWaiting = false;
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                tts.Connect();
+                break;
+            }
+            catch (Exception ex)
+            {
+                if (GetStatus(tts) == "NotRunning")
+                    throw new InvalidOperationException(
+                        "A.I.VOICE Editor exited while waiting for connection.", ex);
+
+                if (DateTimeOffset.UtcNow >= deadline)
+                    throw new TimeoutException(
+                        $"Could not connect to A.I.VOICE Editor within {_startupTimeoutSec}s. " +
+                        "The editor may be stuck or blocked by a dialog.", ex);
+
+                if (!loggedWaiting)
+                {
+                    loggedWaiting = true;
+                    _logger.LogInformation(
+                        "Editor is starting up. Retrying connection for up to {Timeout}s...",
+                        _startupTimeoutSec);
+                }
+                await Task.Delay(2000, ct);
+            }
+        }
 
         _tts = tts;
         Ready = true;
@@ -197,12 +236,25 @@ public sealed class AiVoiceService : IHostedService, IDisposable
             _logger.LogInformation("Restarting A.I.VOICE Editor...");
             Ready = false;
             await TerminateHostAsync();
-            await ConnectWithRetryAsync();
+            await Task.Delay(TimeSpan.FromSeconds(2));
+            await ConnectAsync();
             _logger.LogInformation("A.I.VOICE Editor restarted. Host: {Host}", CurrentHostName);
         }
         finally
         {
             _restartBusy = 0;
+        }
+    }
+
+    private static string GetStatus(dynamic tts)
+    {
+        try
+        {
+            return (string)tts.Status.ToString();
+        }
+        catch
+        {
+            return "Unknown";
         }
     }
 
@@ -234,7 +286,7 @@ public sealed class AiVoiceService : IHostedService, IDisposable
                 (tts, _) = CreateTtsControl();
             }
 
-            var status = (string)tts!.Status.ToString();
+            var status = GetStatus(tts!);
             if (status != "NotRunning")
             {
                 if (status == "NotConnected")
@@ -242,12 +294,13 @@ public sealed class AiVoiceService : IHostedService, IDisposable
                     try { tts.Connect(); } catch { }
                 }
 
+                _logger.LogInformation("Sending TerminateHost to editor...");
                 tts.TerminateHost();
 
                 for (int i = 0; i < 75; i++)
                 {
                     await Task.Delay(200);
-                    if (tts.Status.ToString() == "NotRunning") break;
+                    if (GetStatus(tts) == "NotRunning") break;
                 }
             }
         }
@@ -259,12 +312,13 @@ public sealed class AiVoiceService : IHostedService, IDisposable
         await KillRemainingHostProcessesAsync();
     }
 
-    private static async Task WaitWhileNotRunningAsync(dynamic tts, int iterations)
+    private static async Task WaitWhileNotRunningAsync(dynamic tts, TimeSpan timeout, CancellationToken ct)
     {
-        for (int i = 0; i < iterations; i++)
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
         {
-            await Task.Delay(200);
-            if (tts.Status.ToString() != "NotRunning") break;
+            if (GetStatus(tts) != "NotRunning") return;
+            await Task.Delay(500, ct);
         }
     }
 
@@ -305,23 +359,6 @@ public sealed class AiVoiceService : IHostedService, IDisposable
             finally
             {
                 proc.Dispose();
-            }
-        }
-    }
-
-    private async Task ConnectWithRetryAsync(int attempts = 5, int delayMs = 2000)
-    {
-        for (int i = 1; ; i++)
-        {
-            try
-            {
-                await ConnectAsync();
-                return;
-            }
-            catch (Exception ex) when (i < attempts)
-            {
-                _logger.LogWarning(ex, "Connect attempt {Attempt}/{Total} failed; retrying", i, attempts);
-                await Task.Delay(delayMs);
             }
         }
     }
