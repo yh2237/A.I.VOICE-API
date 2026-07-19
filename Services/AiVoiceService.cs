@@ -96,11 +96,16 @@ public sealed class AiVoiceService : IHostedService, IDisposable
         }
     }
 
+    private const int StatusNotRunning = 0;
+    private const int StatusNotConnected = 1;
+    private const int StatusIdle = 2;
+    private const int StatusBusy = 3;
+
     private bool IsConnectionHealthy()
     {
         if (!Ready || _tts == null) return false;
-        var status = GetStatus(_tts);
-        return status is "Idle" or "Busy";
+        var s = GetStatusInt(_tts);
+        return s == StatusIdle || s == StatusBusy;
     }
 
     private async Task RecoverAsync(CancellationToken ct)
@@ -109,6 +114,9 @@ public sealed class AiVoiceService : IHostedService, IDisposable
 
         try
         {
+            if (_tts != null && IsConnectionHealthy())
+                return;
+
             for (int attempt = 1; ; attempt++)
             {
                 ct.ThrowIfCancellationRequested();
@@ -165,19 +173,19 @@ public sealed class AiVoiceService : IHostedService, IDisposable
 
         var (tts, hostName) = CreateTtsControl();
 
-        if (GetStatus(tts) == "NotRunning")
+        if (GetStatusInt(tts) == StatusNotRunning)
         {
             _logger.LogInformation("Editor not running. Starting via StartHost...");
             try { tts.StartHost(); } catch (Exception ex) { _logger.LogDebug(ex, "StartHost failed"); }
-            await WaitWhileNotRunningAsync(tts, TimeSpan.FromSeconds(15), ct);
+            await WaitWhileStatusAsync(tts, StatusNotRunning, negate: true, timeout: TimeSpan.FromSeconds(15), ct: ct);
 
-            if (GetStatus(tts) == "NotRunning")
+            if (GetStatusInt(tts) == StatusNotRunning)
             {
                 _logger.LogInformation("StartHost had no effect. Starting editor executable...");
                 StartEditorProcess();
-                await WaitWhileNotRunningAsync(tts, TimeSpan.FromSeconds(30), ct);
+                await WaitWhileStatusAsync(tts, StatusNotRunning, negate: true, timeout: TimeSpan.FromSeconds(30), ct: ct);
 
-                if (GetStatus(tts) == "NotRunning")
+                if (GetStatusInt(tts) == StatusNotRunning)
                     throw new InvalidOperationException(
                         "A.I.VOICE Editor process did not start. Check AiVoice:EditorPath.");
             }
@@ -195,7 +203,7 @@ public sealed class AiVoiceService : IHostedService, IDisposable
             }
             catch (Exception ex)
             {
-                if (GetStatus(tts) == "NotRunning")
+                if (GetStatusInt(tts) == StatusNotRunning)
                     throw new InvalidOperationException(
                         "A.I.VOICE Editor exited while waiting for connection.", ex);
 
@@ -246,15 +254,25 @@ public sealed class AiVoiceService : IHostedService, IDisposable
         }
     }
 
-    private static string GetStatus(dynamic tts)
+    private static int GetStatusInt(dynamic tts)
     {
         try
         {
-            return (string)tts.Status.ToString();
+            object raw = tts.Status;
+            if (raw is int i) return i;
+            var s = raw.ToString()!;
+            return s switch
+            {
+                "NotRunning" => 0,
+                "NotConnected" => 1,
+                "Idle" => 2,
+                "Busy" => 3,
+                _ => int.TryParse(s, out var n) ? n : -1,
+            };
         }
         catch
         {
-            return "Unknown";
+            return -1;
         }
     }
 
@@ -286,10 +304,10 @@ public sealed class AiVoiceService : IHostedService, IDisposable
                 (tts, _) = CreateTtsControl();
             }
 
-            var status = GetStatus(tts!);
-            if (status != "NotRunning")
+            var status = GetStatusInt(tts!);
+            if (status != StatusNotRunning && status >= 0)
             {
-                if (status == "NotConnected")
+                if (status == StatusNotConnected)
                 {
                     try { tts.Connect(); } catch { }
                 }
@@ -300,7 +318,7 @@ public sealed class AiVoiceService : IHostedService, IDisposable
                 for (int i = 0; i < 75; i++)
                 {
                     await Task.Delay(200);
-                    if (GetStatus(tts) == "NotRunning") break;
+                    if (GetStatusInt(tts) == StatusNotRunning) break;
                 }
             }
         }
@@ -312,12 +330,13 @@ public sealed class AiVoiceService : IHostedService, IDisposable
         await KillRemainingHostProcessesAsync();
     }
 
-    private static async Task WaitWhileNotRunningAsync(dynamic tts, TimeSpan timeout, CancellationToken ct)
+    private static async Task WaitWhileStatusAsync(dynamic tts, int targetStatus, bool negate, TimeSpan timeout, CancellationToken ct)
     {
         var deadline = DateTimeOffset.UtcNow + timeout;
         while (DateTimeOffset.UtcNow < deadline)
         {
-            if (GetStatus(tts) != "NotRunning") return;
+            var s = GetStatusInt(tts);
+            if (negate ? s != targetStatus : s == targetStatus) return;
             await Task.Delay(500, ct);
         }
     }
