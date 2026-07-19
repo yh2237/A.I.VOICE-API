@@ -7,7 +7,7 @@
     <RootNamespace>AIVoiceApi</RootNamespace>
     <AssemblyName>AIVOICE-API</AssemblyName>
     <DebugType>none</DebugType>
-    <Version>1.0.3</Version>
+    <Version>1.0.4</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <DefaultItemExcludes>$(DefaultItemExcludes);publish\**</DefaultItemExcludes>
   </PropertyGroup>
