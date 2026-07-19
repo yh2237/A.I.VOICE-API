@@ -77,6 +77,8 @@ app.MapGet("/api/presets", (AiVoiceService svc) =>
 
 app.MapPost("/api/reconnect", async (AiVoiceService svc) =>
 {
+    if (svc.IsRestarting)
+        return Results.Json(new { error = "Restart or recovery in progress. Try again later." }, statusCode: 503);
     try
     {
         await svc.ConnectAsync();

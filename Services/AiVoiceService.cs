@@ -22,6 +22,7 @@ public sealed class AiVoiceService : IHostedService, IDisposable
     private volatile int _restartBusy;
 
     public bool Ready { get; private set; }
+    public bool IsRestarting => _restartBusy != 0;
     public string? CurrentHostName { get; private set; }
     public string? Version { get; private set; }
     public IReadOnlyList<string> PresetNames { get; private set; } = Array.Empty<string>();
@@ -226,12 +227,24 @@ public sealed class AiVoiceService : IHostedService, IDisposable
         _tts = tts;
         Ready = true;
         CurrentHostName = hostName;
-        Version = tts.Version.ToString();
+        Version = SafeGet(tts, "Version");
 
-        var presetArray = (string[])tts.VoicePresetNames;
-        PresetNames = presetArray.ToList();
+        var presetArray = SafeGetArray(tts, "VoicePresetNames");
+        PresetNames = presetArray?.ToList() ?? new List<string>();
         _lastPresetName = null;
         _lastMasterControl = null;
+    }
+
+    private static string? SafeGet(dynamic tts, string prop)
+    {
+        try { return tts.GetType().GetProperty(prop)?.GetValue(tts)?.ToString(); }
+        catch { return null; }
+    }
+
+    private static string[]? SafeGetArray(dynamic tts, string prop)
+    {
+        try { return tts.GetType().GetProperty(prop)?.GetValue(tts) as string[]; }
+        catch { return null; }
     }
 
     public async Task RestartHostAsync()
@@ -344,9 +357,25 @@ public sealed class AiVoiceService : IHostedService, IDisposable
     private void StartEditorProcess()
     {
         var existing = Process.GetProcessesByName(_hostProcessName);
-        var alreadyRunning = existing.Length > 0;
-        foreach (var p in existing) p.Dispose();
-        if (alreadyRunning) return;
+        try
+        {
+            var alive = existing.Where(p =>
+            {
+                try { return !p.HasExited; } catch { return false; }
+            }).ToList();
+
+            if (alive.Count > 0)
+            {
+                _logger.LogDebug(
+                    "Editor process already running ({Count} alive), not starting",
+                    alive.Count);
+                return;
+            }
+        }
+        finally
+        {
+            foreach (var p in existing) p.Dispose();
+        }
 
         if (!File.Exists(_editorPath))
             throw new InvalidOperationException($"A.I.VOICE Editor executable not found: {_editorPath}");
@@ -362,24 +391,34 @@ public sealed class AiVoiceService : IHostedService, IDisposable
 
     private async Task KillRemainingHostProcessesAsync()
     {
-        foreach (var proc in Process.GetProcessesByName(_hostProcessName))
+        for (int retry = 0; retry < 3; retry++)
         {
-            try
+            var procs = Process.GetProcessesByName(_hostProcessName);
+            if (procs.Length == 0) { foreach (var p in procs) p.Dispose(); return; }
+
+            foreach (var proc in procs)
             {
-                _logger.LogWarning("Force killing {Name} (PID {Pid})", proc.ProcessName, proc.Id);
-                proc.Kill(entireProcessTree: true);
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                await proc.WaitForExitAsync(cts.Token);
+                try
+                {
+                    _logger.LogWarning("Force killing {Name} (PID {Pid})", proc.ProcessName, proc.Id);
+                    proc.Kill(entireProcessTree: true);
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    await proc.WaitForExitAsync(cts.Token);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to kill {Name} (PID {Pid})", proc.ProcessName, proc.Id);
+                }
+                finally
+                {
+                    proc.Dispose();
+                }
             }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to kill {Name} (PID {Pid})", proc.ProcessName, proc.Id);
-            }
-            finally
-            {
-                proc.Dispose();
-            }
+
+            await Task.Delay(TimeSpan.FromSeconds(1));
         }
+
+        _logger.LogWarning("Some editor processes may still be alive after kill attempts");
     }
 
     private async Task DisconnectAsync()
@@ -460,7 +499,8 @@ public sealed class AiVoiceService : IHostedService, IDisposable
 
     private async Task<byte[]> DoSynthesizeAsync(SynthesisParams p)
     {
-        if (_tts == null || !Ready)
+        dynamic? tts = _tts;
+        if (tts == null || !Ready)
             throw new InvalidOperationException("A.I.VOICE not connected");
 
         var preset = p.Preset ?? PresetNames.FirstOrDefault()
@@ -468,7 +508,7 @@ public sealed class AiVoiceService : IHostedService, IDisposable
 
         if (preset != _lastPresetName)
         {
-            _tts.CurrentVoicePresetName = preset;
+            tts.CurrentVoicePresetName = preset;
             _lastPresetName = preset;
         }
 
@@ -485,15 +525,15 @@ public sealed class AiVoiceService : IHostedService, IDisposable
 
         if (masterControl != _lastMasterControl)
         {
-            _tts.MasterControl = masterControl;
+            tts.MasterControl = masterControl;
             _lastMasterControl = masterControl;
         }
 
-        _tts.Text = p.Text;
+        tts.Text = p.Text;
 
         var tmpPath = Path.Combine(Path.GetTempPath(),
             $"aivoice_synth_{RandomNumberGenerator.GetHexString(8, true)}.wav");
-        _tts.SaveAudioToFile(tmpPath);
+        tts.SaveAudioToFile(tmpPath);
 
         var wav = await File.ReadAllBytesAsync(tmpPath);
         try { File.Delete(tmpPath); } catch { }
